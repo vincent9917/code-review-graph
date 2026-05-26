@@ -156,6 +156,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_claude_skills,
         install_codex_hooks,
         install_codex_skills,
+        install_git_hook,
         install_platform_configs,
     )
 
@@ -198,6 +199,9 @@ def _handle_init(args: argparse.Namespace) -> None:
         if target in ("codex", "all") and PLATFORMS["codex"]["detect"]():
             hooks_path = install_codex_hooks(repo_root)
             print(f"Installed Codex hooks in {hooks_path}")
+        git_hook_path = install_git_hook(repo_root)
+        if git_hook_path:
+            print(f"Installed git pre-commit hook in {git_hook_path}")
 
     print()
     print("Next steps:")
