@@ -643,10 +643,11 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
 def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
-    Called automatically by ``code-review-graph install``
-    Creates ``.git/hooks/pre-commit`` if it doesn't exist, or appends to an
-    existing one — preserving any hooks already there. Returns None when no
-    ``.git`` directory is found.
+    Called automatically by ``code-review-graph install``.
+    Respects ``core.hooksPath`` if configured, otherwise writes to
+    ``.git/hooks/pre-commit``.  Appends to an existing hook rather than
+    overwriting it.  Returns None when no ``.git`` directory is found and
+    no custom hooks path is set.
     """
     script = """\
 #!/bin/sh
@@ -658,13 +659,35 @@ fi
 """
     marker = "code-review-graph detect-changes"
 
-    git_dir = repo_root / ".git"
-    if not git_dir.is_dir():
-        logger.warning("No .git directory found at %s — skipping git hook install.", repo_root)
-        return None
+    import subprocess
 
-    hook_path = git_dir / "hooks" / "pre-commit"
-    hook_path.parent.mkdir(exist_ok=True)
+    try:
+        result = subprocess.run(
+            ["git", "config", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(repo_root),
+        )
+        custom_path = result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        custom_path = ""
+
+    if custom_path:
+        hooks_dir = Path(custom_path)
+        if not hooks_dir.is_absolute():
+            hooks_dir = repo_root / hooks_dir
+    else:
+        git_dir = repo_root / ".git"
+        if not git_dir.is_dir():
+            logger.warning(
+                "No .git directory found at %s — skipping git hook install.", repo_root
+            )
+            return None
+        hooks_dir = git_dir / "hooks"
+
+    hook_path = hooks_dir / "pre-commit"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
 
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8")
