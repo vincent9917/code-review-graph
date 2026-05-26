@@ -196,7 +196,17 @@ class TestInstallGitHook:
         (tmp_path / ".git" / "hooks").mkdir(parents=True)
         return tmp_path
 
-    def test_creates_executable_pre_commit_hook(self, tmp_path):
+    def _mock_no_hooks_path(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            class Result:
+                stdout = "\n"
+                returncode = 0
+            return Result()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def test_creates_executable_pre_commit_hook(self, tmp_path, monkeypatch):
+        self._mock_no_hooks_path(monkeypatch)
         hook_path = install_git_hook(self._make_git_repo(tmp_path))
         assert hook_path is not None and hook_path.name == "pre-commit"
         assert os.access(hook_path, os.X_OK)
@@ -204,7 +214,8 @@ class TestInstallGitHook:
         assert content.startswith("#!/")
         assert "code-review-graph detect-changes" in content
 
-    def test_appends_to_existing_hook(self, tmp_path):
+    def test_appends_to_existing_hook(self, tmp_path, monkeypatch):
+        self._mock_no_hooks_path(monkeypatch)
         repo = self._make_git_repo(tmp_path)
         hook_path = repo / ".git" / "hooks" / "pre-commit"
         hook_path.write_text("#!/bin/sh\nexisting-command\n", encoding="utf-8")
@@ -214,15 +225,75 @@ class TestInstallGitHook:
         assert "existing-command" in content
         assert "code-review-graph detect-changes" in content
 
-    def test_idempotent(self, tmp_path):
+    def test_idempotent(self, tmp_path, monkeypatch):
+        self._mock_no_hooks_path(monkeypatch)
         repo = self._make_git_repo(tmp_path)
         install_git_hook(repo)
         install_git_hook(repo)
         content = (repo / ".git" / "hooks" / "pre-commit").read_text()
         assert content.count("code-review-graph detect-changes") == 1
 
-    def test_no_git_dir_returns_none(self, tmp_path):
+    def test_no_git_dir_returns_none(self, tmp_path, monkeypatch):
+        self._mock_no_hooks_path(monkeypatch)
         assert install_git_hook(tmp_path) is None
+
+    def test_uses_core_hooks_path_absolute(self, tmp_path, monkeypatch):
+        custom_hooks = tmp_path / "custom_hooks"
+        custom_hooks.mkdir()
+
+        def fake_run(cmd, **kwargs):
+            class Result:
+                stdout = str(custom_hooks) + "\n"
+                returncode = 0
+            return Result()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hook_path = install_git_hook(tmp_path)
+        assert hook_path is not None
+        assert hook_path.parent == custom_hooks
+        assert hook_path.name == "pre-commit"
+        assert "code-review-graph detect-changes" in hook_path.read_text()
+
+    def test_uses_core_hooks_path_relative(self, tmp_path, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            class Result:
+                stdout = "my-hooks\n"
+                returncode = 0
+            return Result()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hook_path = install_git_hook(tmp_path)
+        assert hook_path is not None
+        assert hook_path.parent == tmp_path / "my-hooks"
+        assert hook_path.name == "pre-commit"
+        assert "code-review-graph detect-changes" in hook_path.read_text()
+
+    def test_git_config_failure_fallback_to_git_dir(self, tmp_path, monkeypatch):
+        self._make_git_repo(tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            raise OSError("git not found")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        hook_path = install_git_hook(tmp_path)
+        assert hook_path is not None
+        assert hook_path == tmp_path / ".git" / "hooks" / "pre-commit"
+
+    def test_idempotent_with_core_hooks_path(self, tmp_path, monkeypatch):
+        custom_hooks = tmp_path / "custom_hooks"
+        custom_hooks.mkdir()
+
+        def fake_run(cmd, **kwargs):
+            class Result:
+                stdout = str(custom_hooks) + "\n"
+                returncode = 0
+            return Result()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        install_git_hook(tmp_path)
+        install_git_hook(tmp_path)
+        content = (custom_hooks / "pre-commit").read_text()
+        assert content.count("code-review-graph detect-changes") == 1
 
 
 class TestInstallClaudeHooks:
