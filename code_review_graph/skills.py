@@ -21,6 +21,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_INSTALL_TARGETS = ("claude", "codex")
+
 
 # --- Multi-platform MCP install ---
 
@@ -43,9 +45,9 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "claude": {
         "name": "Claude Code",
-        "config_path": lambda root: root / ".mcp.json",
+        "config_path": lambda root: Path.home() / ".claude" / ".mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": lambda: (Path.home() / ".claude").exists(),
         "format": "object",
         "needs_type": True,
     },
@@ -305,10 +307,11 @@ def install_platform_configs(
         List of platform names that were configured.
     """
     if target == "all":
-        platforms_to_install = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
-        # Workspace-level Kiro detection
-        if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
-            platforms_to_install["kiro"] = PLATFORMS["kiro"]
+        platforms_to_install = {}
+        for key in _DEFAULT_INSTALL_TARGETS:
+            plat = PLATFORMS[key]
+            if plat["detect"]():
+                platforms_to_install[key] = plat
     else:
         if target not in PLATFORMS:
             logger.error("Unknown platform: %s", target)
@@ -543,14 +546,16 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
-def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
+def generate_claude_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
+
+    Commands do not include ``--repo``; they rely on ``code-review-graph``
+    auto-detecting the repo from the current working directory.
     """
-    repo_arg = json.dumps(repo_root.resolve().as_posix())
     return {
         "hooks": {
             "PostToolUse": [
@@ -562,8 +567,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                             "command": (
                                 "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph update --skip-flows"
-                                f" --repo {repo_arg}"
+                                " && code-review-graph update --skip-flows"
                                 " || true"
                             ),
                             "timeout": 30,
@@ -580,7 +584,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                             "command": (
                                 "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph status --repo {repo_arg}"
+                                " && code-review-graph status"
                                 " || echo 'Not a git repo, skipping'"
                             ),
                             "timeout": 10,
@@ -675,21 +679,20 @@ fi
     return hook_path
 
 
-def install_hooks(repo_root: Path, platform: str = "claude") -> None:
-    """Write hooks config to platform-specific settings.json.
+def install_claude_hooks(repo_root: Path) -> Path:
+    """Write Claude Code hooks config to ~/.claude/settings.json.
 
     Merges new hook entries into existing settings, preserving both
     non-hook configuration and user-defined hooks.  A backup of the
     original file is created before any modifications.
 
     Args:
-        repo_root: Repository root directory.
-        platform: Target platform ("claude" or "qoder").
+        repo_root: Repository root directory (kept for backward compat).
+
+    Returns:
+        Path to the written settings.json.
     """
-    if platform == "qoder":
-        settings_dir = repo_root / ".qoder"
-    else:
-        settings_dir = repo_root / ".claude"
+    settings_dir = Path.home() / ".claude"
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
@@ -703,7 +706,7 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
-    hooks_config = generate_hooks_config(repo_root)
+    hooks_config = generate_claude_hooks_config(repo_root)
     existing_hooks = existing.get("hooks", {})
     if not isinstance(existing_hooks, dict):
         logger.warning("Existing hooks config is not a dict; replacing with defaults")
@@ -724,6 +727,7 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
+    return settings_path
 
 
 def install_codex_hooks(repo_root: Path) -> Path:
@@ -780,6 +784,73 @@ def install_codex_hooks(repo_root: Path) -> Path:
     hooks_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote Codex hooks config: %s", hooks_path)
     return hooks_path
+
+
+# --- Skills install from bundled skills_data ---
+
+
+def _get_source_skills_dir() -> Path:
+    """Return the bundled skills/ directory inside the package.
+
+    Falls back to the project-root ``skills/`` directory when running
+    from an editable install (where hatchling has not yet copied the
+    files into the package tree).
+    """
+    bundled = Path(__file__).parent / "skills_data"
+    if bundled.exists():
+        return bundled
+    # Editable install fallback: look two levels up from package dir
+    project_root = Path(__file__).parent.parent
+    fallback = project_root / "skills"
+    if fallback.is_dir():
+        return fallback
+    return bundled
+
+
+def _install_skills_to_dir(target_dir: Path) -> Path:
+    """Copy bundled skills to the target skills directory.
+
+    Each subdirectory under the source that contains a ``SKILL.md`` file
+    is copied to ``target_dir/<name>/skill.md`` (file name lower-cased).
+    """
+    source_dir = _get_source_skills_dir()
+    if not source_dir.exists():
+        logger.warning("Source skills directory not found: %s", source_dir)
+        return target_dir
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    installed = 0
+    for skill_dir in source_dir.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_file.exists():
+            continue
+        dest_dir = target_dir / skill_dir.name
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = dest_dir / "skill.md"
+        dest_file.write_text(skill_file.read_text(encoding="utf-8"), encoding="utf-8")
+        installed += 1
+        logger.info("Installed skill: %s", dest_file)
+
+    if installed:
+        logger.info("Installed %d skill(s) to %s", installed, target_dir)
+    return target_dir
+
+
+def install_claude_skills() -> Path:
+    """Install skills to Claude Code's user-level skills directory."""
+    return _install_skills_to_dir(Path.home() / ".claude" / "skills")
+
+
+def install_codex_skills() -> Path:
+    """Install skills to Codex's user-level skills directory."""
+    return _install_skills_to_dir(Path.home() / ".codex" / "skills")
+
+
+# Backward-compat aliases
+_generate_hooks_config = generate_claude_hooks_config
+_install_hooks = install_claude_hooks
 
 
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"

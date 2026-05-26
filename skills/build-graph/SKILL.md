@@ -31,6 +31,14 @@ Build or incrementally update the persistent code knowledge graph for this repos
 - If the graph seems stale or out of sync
 - The graph auto-updates via hooks on edit/commit, so manual builds are rarely needed
 
+4. **Ensure .gitignore ignores graph data**
+   - Check `.gitignore` exists and contains `.code-review-graph/`.
+   - If not, append `.code-review-graph/` to `.gitignore`.
+
+5. **Ensure project contains graph usage instructions**
+   - If `CLAUDE.md` exists and does not already contain the graph instructions marker, append the standard graph usage section.
+   - If other platform instruction files exist (e.g., `AGENTS.md`, `.cursorrules`), append the corresponding instructions where appropriate.
+
 ## Notes
 
 - The graph is stored as a SQLite database (`.code-review-graph/graph.db`) in the repo root

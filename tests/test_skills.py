@@ -2,8 +2,8 @@
 
 import json
 import os
-import subprocess
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -23,18 +23,19 @@ from code_review_graph.skills import (
     _in_poetry_project,
     _in_uv_project,
     _opencode_plugin_content,
+    generate_claude_hooks_config,
     generate_codex_hooks_config,
     generate_cursor_hooks_config,
-    generate_hooks_config,
     generate_skills,
     inject_claude_md,
     inject_platform_instructions,
+    install_claude_hooks,
+    install_claude_skills,
     install_codex_hooks,
+    install_cursor_hooks,
     install_gemini_cli_hooks,
     install_gemini_cli_skills,
-    install_cursor_hooks,
     install_git_hook,
-    install_hooks,
     install_opencode_plugin,
     install_platform_configs,
 )
@@ -109,13 +110,13 @@ class TestGenerateSkills:
         assert len(list(skills_dir.iterdir())) == 4
 
 
-class TestGenerateHooksConfig:
+class TestGenerateClaudeHooksConfig:
     def test_returns_dict_with_hooks(self):
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         assert "hooks" in config
 
     def test_has_post_tool_use(self):
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         assert "PostToolUse" in config["hooks"]
         entry = config["hooks"]["PostToolUse"][0]
         assert entry["matcher"] == "Edit|Write|Bash"
@@ -126,7 +127,7 @@ class TestGenerateHooksConfig:
         assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         assert "SessionStart" in config["hooks"]
         entry = config["hooks"]["SessionStart"][0]
         assert "matcher" in entry
@@ -137,32 +138,30 @@ class TestGenerateHooksConfig:
         assert 0 < inner["timeout"] <= 600
 
     def test_does_not_emit_invalid_pre_commit_hook(self):
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         assert "PreCommit" not in config["hooks"]
 
     def test_has_only_valid_hook_types(self):
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         hook_types = set(config["hooks"].keys())
         assert hook_types == {"PostToolUse", "SessionStart"}
 
     def test_hook_entries_use_nested_hooks_array(self):
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         for hook_type, entries in config["hooks"].items():
             for entry in entries:
                 assert "hooks" in entry, f"{hook_type} entry missing 'hooks' array"
                 assert "command" not in entry, f"{hook_type} has bare 'command' outside hooks[]"
 
-    def test_repo_root_embedded_in_commands(self):
-        config = generate_hooks_config(Path("/my/project"))
+    def test_commands_do_not_include_repo_flag(self):
+        """User-level hooks must not bind to a specific repo path."""
+        config = generate_claude_hooks_config(Path("/my/project"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert "/my/project" in post_cmd
-        assert "/my/project" in session_cmd
-
-    def test_quotes_repo_paths_with_spaces(self):
-        config = generate_hooks_config(Path("/repo with spaces"))
-        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        assert '"' in post_cmd  # path is JSON-encoded so spaces are quoted
+        assert "--repo" not in post_cmd
+        assert "--repo" not in session_cmd
+        assert "code-review-graph update --skip-flows" in post_cmd
+        assert "code-review-graph status" in session_cmd
 
     def test_entries_use_claude_code_hook_schema(self):
         """Regression guard for the Claude Code hook schema.
@@ -173,7 +172,7 @@ class TestGenerateHooksConfig:
         array — missing that wrapper causes the entire settings.json to
         fail to parse ("Expected array, but received undefined").
         """
-        config = generate_hooks_config(Path("/repo"))
+        config = generate_claude_hooks_config(Path("/repo"))
         for event_name, entries in config["hooks"].items():
             for entry in entries:
                 assert "command" not in entry, (
@@ -226,21 +225,23 @@ class TestInstallGitHook:
         assert install_git_hook(tmp_path) is None
 
 
-class TestInstallHooks:
-    def test_creates_settings_file(self, tmp_path):
-        install_hooks(tmp_path)
+class TestInstallClaudeHooks:
+    def test_creates_settings_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        install_claude_hooks(tmp_path)
         settings_path = tmp_path / ".claude" / "settings.json"
         assert settings_path.exists()
         data = json.loads(settings_path.read_text())
         assert "hooks" in data
 
-    def test_merges_with_existing(self, tmp_path):
+    def test_merges_with_existing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
         settings_dir = tmp_path / ".claude"
         settings_dir.mkdir(parents=True)
         existing = {"customSetting": True, "hooks": {"OtherHook": []}}
         (settings_dir / "settings.json").write_text(json.dumps(existing))
 
-        install_hooks(tmp_path)
+        install_claude_hooks(tmp_path)
 
         data = json.loads((settings_dir / "settings.json").read_text())
         assert data["customSetting"] is True
@@ -250,21 +251,23 @@ class TestInstallHooks:
         assert "PreCommit" not in data["hooks"]
         assert "OtherHook" in data["hooks"]  # pre-existing hooks must not be clobbered
 
-    def test_creates_settings_backup(self, tmp_path):
+    def test_creates_settings_backup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
         settings_dir = tmp_path / ".claude"
         settings_dir.mkdir(parents=True)
         existing = {"hooks": {"OtherHook": []}}
         (settings_dir / "settings.json").write_text(json.dumps(existing))
 
-        install_hooks(tmp_path)
+        install_claude_hooks(tmp_path)
 
         backup_path = settings_dir / "settings.json.bak"
         assert backup_path.exists()
         backup = json.loads(backup_path.read_text())
         assert backup == existing
 
-    def test_creates_claude_directory(self, tmp_path):
-        install_hooks(tmp_path)
+    def test_creates_claude_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        install_claude_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
 
 
@@ -388,26 +391,47 @@ class TestInstallCodexHooks:
         assert len(data["hooks"]["PostToolUse"]) == 1
         assert len(data["hooks"]["SessionStart"]) == 1
 
-    def test_install_qoder_hooks(self, tmp_path):
-        install_hooks(tmp_path, platform="qoder")
-        settings_path = tmp_path / ".qoder" / "settings.json"
-        assert settings_path.exists()
-        data = json.loads(settings_path.read_text())
-        assert "hooks" in data
-        assert "PostToolUse" in data["hooks"]
-        assert "SessionStart" in data["hooks"]
 
-    def test_install_qoder_hooks_merges_existing(self, tmp_path):
-        settings_dir = tmp_path / ".qoder"
-        settings_dir.mkdir(parents=True)
-        existing = {"customSetting": True}
-        (settings_dir / "settings.json").write_text(json.dumps(existing))
+class TestInstallClaudeSkills:
+    def test_installs_to_user_skills_dir(self, tmp_path, monkeypatch):
+        from code_review_graph.skills import _get_source_skills_dir
 
-        install_hooks(tmp_path, platform="qoder")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Create a fake skills_data directory with some skills
+        source_dir = _get_source_skills_dir()
+        # If running from source, source_dir may point to the repo's skills/
+        # If not, skip this test gracefully
+        if not source_dir.exists():
+            pytest.skip("Source skills directory not available")
 
-        data = json.loads((settings_dir / "settings.json").read_text())
-        assert data["customSetting"] is True
-        assert "hooks" in data
+        skills_dir = install_claude_skills()
+        assert skills_dir == tmp_path / ".claude" / "skills"
+        assert skills_dir.is_dir()
+
+        # Verify at least one skill was installed
+        installed = [d for d in skills_dir.iterdir() if d.is_dir()]
+        assert len(installed) > 0
+
+        # Verify each installed skill has a skill.md file
+        for skill_dir in installed:
+            skill_file = skill_dir / "skill.md"
+            assert skill_file.is_file()
+            content = skill_file.read_text(encoding="utf-8")
+            assert content.startswith("---\n")
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        from code_review_graph.skills import _get_source_skills_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        source_dir = _get_source_skills_dir()
+        if not source_dir.exists():
+            pytest.skip("Source skills directory not available")
+
+        install_claude_skills()
+        first = list((tmp_path / ".claude" / "skills").iterdir())
+        install_claude_skills()
+        second = list((tmp_path / ".claude" / "skills").iterdir())
+        assert len(first) == len(second)
 
 
 class TestInjectClaudeMd:
@@ -739,8 +763,9 @@ class TestInstallPlatformConfigs:
         assert "code-review-graph" in data["mcpServers"]
 
     def test_install_all_detected(self, tmp_path):
-        """Installing 'all' configures auto-detected platforms."""
+        """Installing 'all' configures only default detected platforms."""
         codex_config = tmp_path / ".codex" / "config.toml"
+        claude_config = tmp_path / ".claude" / ".mcp.json"
         with patch.dict(
             PLATFORMS,
             {
@@ -749,42 +774,70 @@ class TestInstallPlatformConfigs:
                     "config_path": lambda root: codex_config,
                     "detect": lambda: True,
                 },
-                "claude": {**PLATFORMS["claude"], "detect": lambda: True},
-                "opencode": {**PLATFORMS["opencode"], "detect": lambda: True},
-                "cursor": {**PLATFORMS["cursor"], "detect": lambda: False},
-                "windsurf": {**PLATFORMS["windsurf"], "detect": lambda: False},
-                "zed": {**PLATFORMS["zed"], "detect": lambda: False},
-                "continue": {**PLATFORMS["continue"], "detect": lambda: False},
-                "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
-                "gemini-cli": {**PLATFORMS["gemini-cli"], "detect": lambda: False},
+                "claude": {
+                    **PLATFORMS["claude"],
+                    "config_path": lambda root: claude_config,
+                    "detect": lambda: True,
+                },
             },
         ):
             configured = install_platform_configs(tmp_path, target="all")
         assert "Codex" in configured
         assert "Claude Code" in configured
-        assert "OpenCode" in configured
         assert codex_config.exists()
-        assert (tmp_path / ".mcp.json").exists()
-        assert (tmp_path / ".opencode.json").exists()
+        assert claude_config.exists()
 
     def test_merge_existing_servers(self, tmp_path):
         """Should not overwrite existing MCP servers."""
-        mcp_path = tmp_path / ".mcp.json"
+        mcp_path = tmp_path / ".claude" / ".mcp.json"
+        mcp_path.parent.mkdir(parents=True)
         existing = {"mcpServers": {"other-server": {"command": "other"}}}
         mcp_path.write_text(json.dumps(existing))
-        install_platform_configs(tmp_path, target="claude")
+        with patch.dict(
+            PLATFORMS,
+            {
+                "claude": {
+                    **PLATFORMS["claude"],
+                    "config_path": lambda root: mcp_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="claude")
         data = json.loads(mcp_path.read_text())
         assert "other-server" in data["mcpServers"]
         assert "code-review-graph" in data["mcpServers"]
 
     def test_dry_run_no_write(self, tmp_path):
-        configured = install_platform_configs(tmp_path, target="claude", dry_run=True)
+        mcp_path = tmp_path / ".claude" / ".mcp.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "claude": {
+                    **PLATFORMS["claude"],
+                    "config_path": lambda root: mcp_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="claude", dry_run=True)
         assert "Claude Code" in configured
-        assert not (tmp_path / ".mcp.json").exists()
+        assert not mcp_path.exists()
 
     def test_already_configured_skips(self, tmp_path):
-        install_platform_configs(tmp_path, target="claude")
-        configured = install_platform_configs(tmp_path, target="claude")
+        mcp_path = tmp_path / ".claude" / ".mcp.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "claude": {
+                    **PLATFORMS["claude"],
+                    "config_path": lambda root: mcp_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="claude")
+            configured = install_platform_configs(tmp_path, target="claude")
         assert "Claude Code" in configured
 
     def test_continue_array_no_duplicate(self, tmp_path):
@@ -1094,27 +1147,6 @@ class TestKiroPlatform:
         second = (tmp_path / ".kiro" / "steering" / "code-review-graph.md").read_text()
         assert first == second
 
-    def test_kiro_included_in_all_when_detected(self, tmp_path):
-        """install_platform_configs with target='all' includes Kiro when .kiro exists."""
-        (tmp_path / ".kiro").mkdir()
-        # Mock Path.home() to a dir without .kiro so only workspace detection fires
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
-            configured = install_platform_configs(tmp_path, target="all")
-        assert "Kiro" in configured
-
-    def test_kiro_workspace_detection(self, tmp_path):
-        """Kiro detected when repo_root/.kiro exists even if ~/.kiro does not."""
-        (tmp_path / ".kiro").mkdir()
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
-            configured = install_platform_configs(tmp_path, target="all")
-        assert "Kiro" in configured
-        config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
-        assert config_path.exists()
-
     def test_kiro_dry_run(self, tmp_path):
         """dry_run=True does not create any files."""
         configured = install_platform_configs(tmp_path, target="kiro", dry_run=True)
@@ -1205,16 +1237,6 @@ class TestCopilotPlatform:
         assert not (tmp_path / ".windsurfrules").exists()
         assert not (tmp_path / "QODER.md").exists()
 
-    def test_copilot_included_in_all_when_detected(self, tmp_path):
-        """install_platform_configs with target='all' includes Copilot when ~/.vscode exists."""
-        fake_home = tmp_path / "fakehome"
-        (fake_home / ".vscode").mkdir(parents=True)
-        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
-            configured = install_platform_configs(tmp_path, target="all")
-        assert "GitHub Copilot" in configured
-        config_path = tmp_path / ".vscode" / "mcp.json"
-        assert config_path.exists()
-
 
 class TestCopilotCLIPlatform:
     """Tests for GitHub Copilot CLI platform support."""
@@ -1277,7 +1299,8 @@ class TestCopilotCLIPlatform:
         assert "code-review-graph" in data["servers"]
 
     def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
-        """inject_platform_instructions with target='copilot-cli' writes .github/code-review-graph.instruction.md."""
+        """inject_platform_instructions with target='copilot-cli' writes
+        .github/code-review-graph.instruction.md."""
         updated = inject_platform_instructions(tmp_path, target="copilot-cli")
         assert ".github/code-review-graph.instruction.md" in updated
         instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
