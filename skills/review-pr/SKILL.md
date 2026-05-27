@@ -55,8 +55,8 @@ Perform a comprehensive code review of a pull request or branch diff using the k
    - <function_name> in <file> - no test coverage found
 
    ### Recommendations
-   1. <actionable suggestion>
-   2. <actionable suggestion>
+   - <actionable suggestion>
+   - <actionable suggestion>
    ```
 
 ## Tips

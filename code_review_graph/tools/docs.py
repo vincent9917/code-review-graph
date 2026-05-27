@@ -158,7 +158,7 @@ def get_docs_section(
                 }
 
     available = [
-        "usage", "review-delta", "review-pr", "commands",
+        "usage", "review-delta", "review-pr", "review-mr", "commands",
         "legal", "watch", "embeddings", "languages", "troubleshooting",
     ]
     return {
