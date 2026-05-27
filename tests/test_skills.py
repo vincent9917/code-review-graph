@@ -836,7 +836,7 @@ class TestInstallPlatformConfigs:
     def test_install_all_detected(self, tmp_path):
         """Installing 'all' configures only default detected platforms."""
         codex_config = tmp_path / ".codex" / "config.toml"
-        claude_config = tmp_path / ".claude" / ".mcp.json"
+        claude_config = tmp_path / ".claude.json"
         with patch.dict(
             PLATFORMS,
             {
@@ -860,8 +860,7 @@ class TestInstallPlatformConfigs:
 
     def test_merge_existing_servers(self, tmp_path):
         """Should not overwrite existing MCP servers."""
-        mcp_path = tmp_path / ".claude" / ".mcp.json"
-        mcp_path.parent.mkdir(parents=True)
+        mcp_path = tmp_path / ".claude.json"
         existing = {"mcpServers": {"other-server": {"command": "other"}}}
         mcp_path.write_text(json.dumps(existing))
         with patch.dict(
@@ -880,7 +879,7 @@ class TestInstallPlatformConfigs:
         assert "code-review-graph" in data["mcpServers"]
 
     def test_dry_run_no_write(self, tmp_path):
-        mcp_path = tmp_path / ".claude" / ".mcp.json"
+        mcp_path = tmp_path / ".claude.json"
         with patch.dict(
             PLATFORMS,
             {
@@ -896,7 +895,7 @@ class TestInstallPlatformConfigs:
         assert not mcp_path.exists()
 
     def test_already_configured_skips(self, tmp_path):
-        mcp_path = tmp_path / ".claude" / ".mcp.json"
+        mcp_path = tmp_path / ".claude.json"
         with patch.dict(
             PLATFORMS,
             {

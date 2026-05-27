@@ -45,9 +45,9 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "claude": {
         "name": "Claude Code",
-        "config_path": lambda root: Path.home() / ".claude" / ".mcp.json",
+        "config_path": lambda root: Path.home() / ".claude.json",
         "key": "mcpServers",
-        "detect": lambda: (Path.home() / ".claude").exists(),
+        "detect": lambda: (Path.home() / ".claude").exists() or (Path.home() / ".claude.json").exists(),
         "format": "object",
         "needs_type": True,
     },
