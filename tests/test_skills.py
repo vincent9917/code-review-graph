@@ -18,6 +18,7 @@ else:  # pragma: no cover - Python 3.10 backport
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
+    _build_server_entry,
     _cursor_hook_scripts,
     _detect_serve_command,
     _in_poetry_project,
@@ -777,6 +778,24 @@ class TestInstallPlatformConfigs:
         assert "other-server" in data["mcpServers"]
         assert "code-review-graph" in data["mcpServers"]
 
+    def test_claude_entry_has_no_cwd(self, tmp_path):
+        """MCP server entry should not hard-code cwd; it resolves from server cwd."""
+        mcp_path = tmp_path / ".claude.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "claude": {
+                    **PLATFORMS["claude"],
+                    "config_path": lambda root: mcp_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="claude")
+        data = json.loads(mcp_path.read_text())
+        entry = data["mcpServers"]["code-review-graph"]
+        assert "cwd" not in entry
+
     def test_dry_run_no_write(self, tmp_path):
         configured = install_platform_configs(tmp_path, target="claude", dry_run=True)
         assert "Claude Code" in configured
@@ -1437,6 +1456,33 @@ class TestDetectServeCommand:
         monkeypatch.setattr("code_review_graph.skills.sys.executable", str(fake_python))
         monkeypatch.setattr("code_review_graph.skills.Path.home", staticmethod(lambda: tmp_path))
         assert _in_uv_project() is False
+
+
+class TestBuildServerEntry:
+    """Tests for _build_server_entry()."""
+
+    def test_includes_command_and_args(self):
+        entry = _build_server_entry(PLATFORMS["claude"], key="claude")
+        assert "command" in entry
+        assert "args" in entry
+        assert entry["args"][-1] == "serve"
+
+    def test_excludes_cwd(self):
+        """Global config should not hard-code cwd; server resolves repo from cwd."""
+        entry = _build_server_entry(PLATFORMS["claude"], key="claude")
+        assert "cwd" not in entry
+
+    def test_needs_type_adds_stdio(self):
+        entry = _build_server_entry(PLATFORMS["claude"], key="claude")
+        assert entry["type"] == "stdio"
+
+    def test_needs_type_false_omits_type(self):
+        entry = _build_server_entry(PLATFORMS["windsurf"], key="windsurf")
+        assert "type" not in entry
+
+    def test_opencode_adds_empty_env(self):
+        entry = _build_server_entry(PLATFORMS["opencode"], key="opencode")
+        assert entry["env"] == []
 
 
 class TestOpenCodePluginContent:

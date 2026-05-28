@@ -230,14 +230,11 @@ def _detect_serve_command() -> tuple[str, list[str]]:
 
 
 def _build_server_entry(
-    plat: dict[str, Any], key: str = "", repo_root: "Path | None" = None,
+    plat: dict[str, Any], key: str = "",
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
     entry: dict[str, Any] = {"command": command, "args": args}
-    # Include cwd so the MCP server can find the graph database
-    if repo_root is not None:
-        entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
@@ -320,7 +317,7 @@ def install_platform_configs(
     for key, plat in platforms_to_install.items():
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
-        server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
+        server_entry = _build_server_entry(plat, key=key)
 
         if plat["format"] == "toml":
             changed = _merge_toml_mcp_server(
@@ -344,17 +341,22 @@ def install_platform_configs(
         existing: dict[str, Any] = {}
         if config_path.exists():
             raw = config_path.read_text(encoding="utf-8", errors="replace")
-            # Strip single-line comments and trailing commas (JSONC compat
-            # for editors like Zed that allow non-standard JSON).
-            stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
-            stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
             try:
-                existing = json.loads(stripped)
-            except (json.JSONDecodeError, OSError):
-                print(f"  {plat['name']}: {config_path} contains "
-                      f"unparseable JSON — skipping to avoid data loss. "
-                      f"Please add the MCP config manually.")
-                continue
+                # Try standard JSON first (most common case).
+                existing = json.loads(raw)
+            except json.JSONDecodeError:
+                # Fallback: strip single-line comments and trailing commas
+                # (JSONC compat for editors like Zed).
+                # NOTE: This naive regex can break URLs containing "//".
+                stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
+                stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
+                try:
+                    existing = json.loads(stripped)
+                except (json.JSONDecodeError, OSError):
+                    print(f"  {plat['name']}: {config_path} contains "
+                          f"unparseable JSON — skipping to avoid data loss. "
+                          f"Please add the MCP config manually.")
+                    continue
 
         if plat["format"] == "array":
             arr = existing.get(server_key, [])

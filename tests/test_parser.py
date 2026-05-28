@@ -1458,3 +1458,85 @@ class TestCppScopedFunctionName:
         fns = [n for n in nodes if n.kind == "Function"]
         assert len(fns) == 1
         assert fns[0].name == "get_obj_fingerprint"
+
+
+class TestPythonExportedSymbolResolution:
+    """Tests for Python re-export resolution in _resolve_exported_symbol."""
+
+    def test_simple_reexport_through_init(self, tmp_path):
+        """`from .sub import foo` in __init__.py should resolve to sub.py::foo."""
+        pkg = tmp_path / "tmp_pkg"
+        pkg.mkdir()
+        init_py = pkg / "__init__.py"
+        init_py.write_text("from .sub import foo\n", encoding="utf-8")
+        sub_py = pkg / "sub.py"
+        sub_py.write_text("def foo(): pass\n", encoding="utf-8")
+
+        parser = CodeParser()
+        result = parser._resolve_exported_symbol(str(init_py), "foo")
+        assert result is not None
+        assert result == f"{sub_py}::foo"
+
+    def test_reexport_with_alias(self, tmp_path):
+        """`from .sub import foo as bar` should track back to original name foo."""
+        pkg = tmp_path / "tmp_pkg"
+        pkg.mkdir()
+        init_py = pkg / "__init__.py"
+        init_py.write_text("from .sub import foo as bar\n", encoding="utf-8")
+        sub_py = pkg / "sub.py"
+        sub_py.write_text("def foo(): pass\n", encoding="utf-8")
+
+        parser = CodeParser()
+        result = parser._resolve_exported_symbol(str(init_py), "bar")
+        assert result is not None
+        assert result == f"{sub_py}::foo"
+
+    def test_direct_definition_wins_over_reexport(self, tmp_path):
+        """If __init__.py defines foo locally, don't recurse to submodules."""
+        pkg = tmp_path / "tmp_pkg"
+        pkg.mkdir()
+        init_py = pkg / "__init__.py"
+        init_py.write_text("def foo(): pass\n", encoding="utf-8")
+
+        parser = CodeParser()
+        result = parser._resolve_exported_symbol(str(init_py), "foo")
+        assert result == f"{init_py}::foo"
+
+    def test_circular_reexport_returns_none(self, tmp_path):
+        """Circular re-exports should not infinite-loop; return None gracefully."""
+        a_pkg = tmp_path / "a"
+        a_pkg.mkdir()
+        a_init = a_pkg / "__init__.py"
+        a_init.write_text("from .b import foo\n", encoding="utf-8")
+
+        b_pkg = tmp_path / "b"
+        b_pkg.mkdir()
+        b_init = b_pkg / "__init__.py"
+        b_init.write_text("from .a import foo\n", encoding="utf-8")
+
+        parser = CodeParser()
+        # This should not hang; seen set prevents infinite recursion.
+        result = parser._resolve_exported_symbol(str(a_init), "foo")
+        assert result is None
+
+    def test_reexport_calls_edge_in_parsed_file(self, tmp_path):
+        """Full integration: parsing a test file that imports through __init__.py."""
+        pkg = tmp_path / "tmp_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("from .sub import foo\n", encoding="utf-8")
+        (pkg / "sub.py").write_text("def foo(): pass\n", encoding="utf-8")
+
+        test_py = tmp_path / "test_reexport.py"
+        test_py.write_text(
+            "from tmp_pkg import foo\n\ndef test_something():\n    foo()\n",
+            encoding="utf-8",
+        )
+
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(test_py)
+
+        call_edges = [e for e in edges if e.kind == "CALLS"]
+        assert len(call_edges) == 1
+        # The target should resolve to sub.py, not __init__.py
+        assert "sub.py" in call_edges[0].target
+        assert "__init__.py" not in call_edges[0].target

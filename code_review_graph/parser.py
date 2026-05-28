@@ -5570,6 +5570,10 @@ class CodeParser:
 
         path = Path(module_file)
         language = self.detect_language(path)
+        if language == "python":
+            return self._resolve_python_exported_symbol(
+                module_file, symbol_name, seen, cache_key,
+            )
         if language not in ("javascript", "typescript", "tsx", "vue"):
             return None
 
@@ -5654,6 +5658,137 @@ class CodeParser:
 
         self._export_symbol_cache[cache_key] = None
         return None
+
+    def _resolve_python_exported_symbol(
+        self,
+        module_file: str,
+        symbol_name: str,
+        seen: set[tuple[str, str]],
+        cache_key: str,
+    ) -> Optional[str]:
+        """Resolve a Python symbol through `__init__.py` re-export patterns.
+
+        Handles `from .sub import func` and `from .sub import func as alias`
+        inside package `__init__.py` files to find the true definition location.
+        """
+        try:
+            source = Path(module_file).read_bytes()
+        except (OSError, PermissionError):
+            self._export_symbol_cache[cache_key] = None
+            return None
+
+        parser = self._get_parser("python")
+        if not parser:
+            self._export_symbol_cache[cache_key] = None
+            return None
+
+        tree = parser.parse(source)
+
+        # 1. Direct local definition
+        _, defined_names = self._collect_file_scope(
+            tree.root_node, "python", source,
+        )
+        if symbol_name in defined_names:
+            result = self._qualify(symbol_name, module_file, None)
+            self._export_symbol_cache[cache_key] = result
+            return result
+
+        # 2. Re-export via import_from_statement
+        for child in tree.root_node.children:
+            if child.type != "import_from_statement":
+                continue
+
+            module_name: Optional[str] = None
+            seen_import_keyword = False
+            imported: list[tuple[str, str]] = []
+
+            for sub in child.children:
+                if not seen_import_keyword and sub.type in (
+                    "dotted_name", "relative_import",
+                ):
+                    module_name = sub.text.decode("utf-8", errors="replace")
+                elif sub.type == "import":
+                    seen_import_keyword = True
+                elif seen_import_keyword:
+                    if sub.type in ("identifier", "dotted_name"):
+                        name = sub.text.decode("utf-8", errors="replace")
+                        imported.append((name, name))
+                    elif sub.type == "aliased_import":
+                        original = None
+                        alias = None
+                        for s in sub.children:
+                            if s.type in ("identifier", "dotted_name"):
+                                name = s.text.decode("utf-8", errors="replace")
+                                if original is None:
+                                    original = name
+                                else:
+                                    alias = name
+                        if alias and original:
+                            imported.append((alias, original))
+                        elif original:
+                            imported.append((original, original))
+
+            for local_name, original_name in imported:
+                if local_name == symbol_name:
+                    resolved = self._resolve_python_module_file(
+                        module_name, module_file, original_name,
+                    )
+                    if resolved and resolved != module_file:
+                        result = self._resolve_exported_symbol(
+                            resolved, original_name, seen,
+                        )
+                        if result:
+                            self._export_symbol_cache[cache_key] = result
+                            return result
+                    break
+
+        self._export_symbol_cache[cache_key] = None
+        return None
+
+    def _resolve_python_module_file(
+        self,
+        module_name: Optional[str],
+        module_file: str,
+        symbol_name: str,
+    ) -> Optional[str]:
+        """Resolve a Python relative/absolute module name to a file path.
+
+        Unlike _resolve_module_to_file, this correctly handles relative
+        imports with leading dots (e.g. `.sub` → `sub.py`).
+        """
+        if not module_name:
+            # `from . import foo` — foo is a sibling module
+            parent = Path(module_file).parent
+            for cand in (
+                parent / f"{symbol_name}.py",
+                parent / symbol_name / "__init__.py",
+            ):
+                if cand.is_file():
+                    return str(cand.resolve())
+            return None
+
+        if module_name.startswith("."):
+            # Relative import: count dots, strip them, walk up directories
+            dots = 0
+            while dots < len(module_name) and module_name[dots] == ".":
+                dots += 1
+            rel_path = module_name[dots:].replace(".", "/")
+            base = Path(module_file).parent
+            for _ in range(dots - 1):
+                base = base.parent
+            if rel_path:
+                candidates = [rel_path + ".py", rel_path + "/__init__.py"]
+            else:
+                # `from . import foo` already handled above, but guard here
+                candidates = [f"{symbol_name}.py", f"{symbol_name}/__init__.py"]
+            for cand in candidates:
+                target = base / cand
+                if target.is_file():
+                    return str(target.resolve())
+            return None
+
+        # Absolute import — delegate to the existing resolver
+        return self._resolve_module_to_file(module_name, module_file, "python")
 
     def _qualify(self, name: str, file_path: str, enclosing_class: Optional[str]) -> str:
         """Create a qualified name: file_path::ClassName.name or file_path::name."""
