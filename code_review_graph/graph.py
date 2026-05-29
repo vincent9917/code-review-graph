@@ -366,6 +366,14 @@ class GraphStore:
         ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
+    def search_edges_by_source_name(self, name: str, kind: str = "CALLS") -> list[GraphEdge]:
+        """Search for edges where source_qualified matches an unqualified name."""
+        rows = self._conn.execute(
+            "SELECT * FROM edges WHERE source_qualified = ? AND kind = ?",
+            (name, kind),
+        ).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
     def get_transitive_tests(
         self, qualified_name: str, max_depth: int = 1, max_frontier: int | None = None,
     ) -> list[dict]:
@@ -418,28 +426,28 @@ class GraphStore:
         # Direct TESTED_BY
         for qn in input_qns:
             for row in conn.execute(
-                "SELECT source_qualified FROM edges "
-                "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                "SELECT target_qualified FROM edges "
+                "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
                 (qn,),
             ).fetchall():
-                src = row["source_qualified"]
-                if src not in seen:
-                    seen.add(src)
-                    d = _node_dict(src, indirect=False)
+                tgt = row["target_qualified"]
+                if tgt not in seen:
+                    seen.add(tgt)
+                    d = _node_dict(tgt, indirect=False)
                     if d:
                         results.append(d)
 
         # Bare-name fallback for direct
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         for row in conn.execute(
-            "SELECT source_qualified FROM edges "
-            "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+            "SELECT target_qualified FROM edges "
+            "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
             (bare,),
         ).fetchall():
-            src = row["source_qualified"]
-            if src not in seen:
-                seen.add(src)
-                d = _node_dict(src, indirect=False)
+            tgt = row["target_qualified"]
+            if tgt not in seen:
+                seen.add(tgt)
+                d = _node_dict(tgt, indirect=False)
                 if d:
                     results.append(d)
 
@@ -458,14 +466,14 @@ class GraphStore:
                 next_frontier = set(list(next_frontier)[:max_frontier])
             for callee in next_frontier:
                 for row in conn.execute(
-                    "SELECT source_qualified FROM edges "
-                    "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                    "SELECT target_qualified FROM edges "
+                    "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
                     (callee,),
                 ).fetchall():
-                    src = row["source_qualified"]
-                    if src not in seen:
-                        seen.add(src)
-                        d = _node_dict(src, indirect=True)
+                    tgt = row["target_qualified"]
+                    if tgt not in seen:
+                        seen.add(tgt)
+                        d = _node_dict(tgt, indirect=True)
                         if d:
                             results.append(d)
             frontier = next_frontier

@@ -66,8 +66,8 @@ class TestChanges:
     def _add_tested_by(self, test_qn: str, target_qn: str, path: str = "app.py") -> None:
         edge = EdgeInfo(
             kind="TESTED_BY",
-            source=test_qn,
-            target=target_qn,
+            source=target_qn,
+            target=test_qn,
             file_path=path,
             line=1,
         )

@@ -493,7 +493,7 @@ def find_dead_code(
             ]
             incoming = incoming + all_bare
         if not any(e.kind == "TESTED_BY" for e in incoming):
-            bare_tb = store.search_edges_by_target_name(node.name, kind="TESTED_BY")
+            bare_tb = store.search_edges_by_source_name(node.name, kind="TESTED_BY")
             bare_tb = [
                 e for e in bare_tb
                 if _is_plausible_caller(e.file_path, node.file_path, node.name)
