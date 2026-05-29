@@ -293,18 +293,33 @@ def query_graph(
                         results.append(node_to_dict(child))
 
         elif pattern == "tests_for":
+            seen: set[str] = set()
+
+            # Layer 1: exact qualified name
             for e in store.get_edges_by_source(qn):
                 if e.kind == "TESTED_BY":
-                    test = store.get_node(e.target_qualified)
-                    if test:
-                        results.append(node_to_dict(test))
-            # Also search by naming convention
+                    if e.target_qualified not in seen:
+                        seen.add(e.target_qualified)
+                        test = store.get_node(e.target_qualified)
+                        if test:
+                            results.append(node_to_dict(test))
+
+            # Layer 2: bare-name fallback (mirrors callers_of)
+            if node:
+                for e in store.search_edges_by_source_name(node.name, kind="TESTED_BY"):
+                    if e.target_qualified not in seen:
+                        seen.add(e.target_qualified)
+                        test = store.get_node(e.target_qualified)
+                        if test:
+                            results.append(node_to_dict(test))
+
+            # Layer 3: naming convention
             name = node.name if node else target
             test_nodes = store.search_nodes(f"test_{name}", limit=10)
             test_nodes += store.search_nodes(f"Test{name}", limit=10)
-            seen = {r.get("qualified_name") for r in results}
             for t in test_nodes:
                 if t.qualified_name not in seen and t.is_test:
+                    seen.add(t.qualified_name)
                     results.append(node_to_dict(t))
 
         elif pattern == "inheritors_of":
